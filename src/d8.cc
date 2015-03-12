@@ -228,6 +228,53 @@ ScriptCompiler::CachedData* CompileForCachedData(
 }
 
 
+bool CompileForCachedFile(char* file, Local<String> source, Local<Value> name,
+                          ScriptCompiler::CompileOptions compile_options) {
+  int source_length = source->Length();
+  uint16_t* source_buffer = new uint16_t[source_length];
+  source->Write(source_buffer, 0, source_length);
+  int name_length = 0;
+  uint16_t* name_buffer = NULL;
+  if (name->IsString()) {
+    Local<String> name_string = Local<String>::Cast(name);
+    name_length = name_string->Length();
+    name_buffer = new uint16_t[name_length];
+    name_string->Write(name_buffer, 0, name_length);
+  }
+  Isolate* temp_isolate = Isolate::New();
+  {
+    Isolate::Scope isolate_scope(temp_isolate);
+    HandleScope handle_scope(temp_isolate);
+    Context::Scope context_scope(Context::New(temp_isolate));
+    Local<String> source_copy = v8::String::NewFromTwoByte(
+        temp_isolate, source_buffer, v8::String::kNormalString, source_length);
+    Local<Value> name_copy;
+    if (name_buffer) {
+      name_copy = v8::String::NewFromTwoByte(
+          temp_isolate, name_buffer, v8::String::kNormalString, name_length);
+    } else {
+      name_copy = v8::Undefined(temp_isolate);
+    }
+    ScriptCompiler::Source script_source(source_copy, ScriptOrigin(name_copy));
+    ScriptCompiler::CompileUnbound(temp_isolate, &script_source,
+                                   compile_options);
+    if (script_source.GetCachedData()) {
+      int length = script_source.GetCachedData()->length;
+      uint8_t* cache = new uint8_t[length];
+      memcpy(cache, script_source.GetCachedData()->data, length);
+
+      FILE* fp = base::OS::FOpen(file, "wb");
+      fwrite(cache, 1, length, fp);
+      fclose(fp);
+    }
+  }
+  temp_isolate->Dispose();
+  delete[] source_buffer;
+  delete[] name_buffer;
+  return true;
+}
+
+
 // Compile a string within the current v8 context.
 Local<Script> Shell::CompileString(
     Isolate* isolate, Local<String> source, Local<Value> name,
@@ -625,6 +672,30 @@ void Shell::Load(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 
+void Shell::Compile(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  HandleScope handle_scope(args.GetIsolate());
+  String::Utf8Value source_file(args[0]);
+  if (*source_file == NULL) {
+    Throw(args.GetIsolate(), "Error loading file");
+    return;
+  }
+  Handle<String> source = ReadFile(args.GetIsolate(), *source_file);
+  if (source.IsEmpty()) {
+    Throw(args.GetIsolate(), "Error loading file");
+    return;
+  }
+  String::Utf8Value cache_file(args[1]);
+  Handle<Value> name = { String::NewFromUtf8(args.GetIsolate(), *source_file) };
+  if (!CompileForCachedFile(*cache_file, source, name,
+                            v8::ScriptCompiler::kProduceCodeCache)) {
+    Throw(args.GetIsolate(), "Error executing file");
+    return;
+  }
+  Handle<String> success = String::NewFromUtf8(args.GetIsolate(), "compile successfully");
+  args.GetReturnValue().Set(success);
+}
+
+
 void Shell::Quit(const v8::FunctionCallbackInfo<v8::Value>& args) {
   int exit_code = args[0]->Int32Value();
   OnExit(args.GetIsolate());
@@ -920,6 +991,10 @@ Handle<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
                        FunctionTemplate::New(isolate, ReadLine));
   global_template->Set(String::NewFromUtf8(isolate, "load"),
                        FunctionTemplate::New(isolate, Load));
+  global_template->Set(String::NewFromUtf8(isolate, "compile"),
+                       FunctionTemplate::New(isolate, Compile));
+  global_template->Set(String::NewFromUtf8(isolate, "runBin"),
+                       FunctionTemplate::New(isolate, RunBin));
   global_template->Set(String::NewFromUtf8(isolate, "quit"),
                        FunctionTemplate::New(isolate, Quit));
   global_template->Set(String::NewFromUtf8(isolate, "version"),
@@ -1140,6 +1215,53 @@ static void ReadBufferWeakCallback(
   delete[] data.GetParameter()->data;
   data.GetParameter()->handle.Reset();
   delete data.GetParameter();
+}
+
+
+void FixSourceNWBin(Isolate* v8_isolate, Handle<UnboundScript> script) {
+  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(v8_isolate);
+  i::Handle<i::HeapObject> obj =
+  i::Handle<i::HeapObject>::cast(v8::Utils::OpenHandle(*script));
+  i::Handle<i::SharedFunctionInfo>
+  function_info(i::SharedFunctionInfo::cast(*obj), obj->GetIsolate());
+  reinterpret_cast<i::Script*>(function_info->script())->set_source(isolate->heap()->undefined_value());
+}
+
+
+void Shell::RunBin(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  for (int i = 0; i < args.Length(); i++) {
+    HandleScope handle_scope(args.GetIsolate());
+    String::Utf8Value file(args[i]);
+    if (*file == NULL) {
+      Throw(args.GetIsolate(), "Error loading file");
+      return;
+    }
+    int size;
+    char* chars = ReadChars(args.GetIsolate(), *file, &size);
+    if (chars == NULL) return;
+    uint8_t* cache_data = new uint8_t[size];
+    memcpy(cache_data, chars, size);
+    delete[] chars;
+
+    ScriptCompiler::CachedData* cache = new ScriptCompiler::CachedData(
+        cache_data, size, ScriptCompiler::CachedData::BufferNotOwned);
+
+    Handle<String> source = String::NewFromUtf8(args.GetIsolate(), "");
+    ScriptCompiler::Source cached_source(source, cache);
+    // Handle<String> source = ReadFile(args.GetIsolate(),
+    //     "/home/liying/workspace/node-webkit/nw-sample-apps/optimiz-test/test2.js");
+    // ScriptOrigin origin(String::NewFromUtf8(args.GetIsolate(),
+    //     "/home/liying/workspace/node-webkit/nw-sample-apps/optimiz-test/test2.js"));
+    // ScriptCompiler::Source cached_source(source, origin, cache);
+
+    Handle<UnboundScript> script = ScriptCompiler::CompileUnbound(args.GetIsolate(),
+                                                   &cached_source,
+                                                   ScriptCompiler::kConsumeCodeCache);
+    FixSourceNWBin(args.GetIsolate(), script);
+
+    Handle<Value> result = script->BindToCurrentContext()->Run();
+    args.GetReturnValue().Set(result);
+  }
 }
 
 
