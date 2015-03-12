@@ -42,6 +42,7 @@
       'dependencies': [
         '../tools/gyp/v8.gyp:v8',
         '../tools/gyp/v8.gyp:v8_libplatform',
+        '../tools/gyp/v8.gyp:v8_nosnapshot',
       ],
       # Generated source files need this explicitly:
       'include_dirs+': [

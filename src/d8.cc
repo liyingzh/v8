@@ -611,6 +611,68 @@ void Shell::Load(const v8::FunctionCallbackInfo<v8::Value>& args) {
 }
 
 
+void Shell::Compile(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  i::CpuFeatures::Probe(true);
+
+  Isolate* temp_isolate = Isolate::New();
+  {
+    Isolate::Scope isolate_scope(temp_isolate);
+    HandleScope handle_scope(temp_isolate);
+    Context::Scope context_scope(Context::New(temp_isolate));
+
+    String::Utf8Value source_file(args[0]);
+    if (*source_file == NULL) {
+      Throw(temp_isolate, "Error loading file");
+      return;
+    }
+    Local<String> source = ReadFile(temp_isolate, *source_file);
+    if (source.IsEmpty()) {
+      Throw(temp_isolate, "Error loading file");
+      return;
+    }
+
+    bool log_code = i::FLAG_log_code;
+    bool harmony_shipping = i::FLAG_harmony_shipping;
+    bool logfile_per_isolate = i::FLAG_logfile_per_isolate;
+    bool serialize_toplevel = i::FLAG_serialize_toplevel;
+    bool lazy = i::FLAG_lazy;
+
+    i::FLAG_log_code = true;
+    i::FLAG_harmony_shipping = false;
+    i::FLAG_logfile_per_isolate = false;
+    i::FLAG_serialize_toplevel = true;
+    i::FLAG_lazy = false;
+
+    ScriptCompiler::Source script_source(source, ScriptOrigin(v8::Undefined(temp_isolate)));
+    ScriptCompiler::CompileUnbound(temp_isolate, &script_source,
+                                   v8::ScriptCompiler::kProduceCodeCache);
+
+    i::FLAG_log_code = log_code;
+    i::FLAG_harmony_shipping = harmony_shipping;
+    i::FLAG_logfile_per_isolate = logfile_per_isolate;
+    i::FLAG_serialize_toplevel = serialize_toplevel;
+    i::FLAG_lazy = lazy;
+
+    if (!script_source.GetCachedData()) {
+      Throw(temp_isolate, "Error executing file");
+      return;
+    }
+
+    int length = script_source.GetCachedData()->length;
+    uint8_t* cache = new uint8_t[length];
+    memcpy(cache, script_source.GetCachedData()->data, length);
+    String::Utf8Value cache_file(args[1]);
+    FILE* fp = base::OS::FOpen(*cache_file, "wb");
+    fwrite(cache, 1, length, fp);
+    fclose(fp);
+  }
+  temp_isolate->Dispose();
+
+  Handle<String> success = String::NewFromUtf8(args.GetIsolate(), "compile successfully");
+  args.GetReturnValue().Set(success);
+}
+
+
 void Shell::Quit(const v8::FunctionCallbackInfo<v8::Value>& args) {
   int exit_code = args[0]->Int32Value();
   OnExit(args.GetIsolate());
@@ -893,6 +955,10 @@ Handle<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
                        FunctionTemplate::New(isolate, ReadLine));
   global_template->Set(String::NewFromUtf8(isolate, "load"),
                        FunctionTemplate::New(isolate, Load));
+  global_template->Set(String::NewFromUtf8(isolate, "compile"),
+                       FunctionTemplate::New(isolate, Compile));
+  global_template->Set(String::NewFromUtf8(isolate, "runBin"),
+                       FunctionTemplate::New(isolate, RunBin));
   global_template->Set(String::NewFromUtf8(isolate, "quit"),
                        FunctionTemplate::New(isolate, Quit));
   global_template->Set(String::NewFromUtf8(isolate, "version"),
@@ -1116,6 +1182,42 @@ static void ReadBufferWeakCallback(
 }
 
 
+void Shell::RunBin(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  for (int i = 0; i < args.Length(); i++) {
+    String::Utf8Value file(args[i]);
+    if (*file == NULL) {
+      Throw(isolate, "Error loading file");
+      return;
+    }
+    int size;
+    char* chars = ReadChars(isolate, *file, &size);
+    if (chars == NULL) return;
+    uint8_t* cache_data = new uint8_t[size];
+    memcpy(cache_data, chars, size);
+    delete[] chars;
+
+    bool serialize_toplevel = i::FLAG_serialize_toplevel;
+    i::FLAG_serialize_toplevel = true;
+
+    ScriptCompiler::CachedData* cache = new ScriptCompiler::CachedData(
+        cache_data, size, ScriptCompiler::CachedData::BufferNotOwned);
+    Handle<String> source = String::NewFromUtf8(isolate, "");
+    ScriptCompiler::Source cached_source(source, cache);
+    Local<UnboundScript> script = ScriptCompiler::CompileUnbound(
+        isolate, &cached_source, ScriptCompiler::kConsumeCodeCache);
+
+    i::FLAG_serialize_toplevel = serialize_toplevel;
+
+    if (cache->rejected) {
+      Throw(isolate, "Cache rejected");
+      return;
+    }
+    script->BindToCurrentContext()->Run();
+  }
+}
+
+
 void Shell::ReadBuffer(const v8::FunctionCallbackInfo<v8::Value>& args) {
   DCHECK(sizeof(char) == sizeof(uint8_t));  // NOLINT
   String::Utf8Value filename(args[0]);
@@ -1171,7 +1273,7 @@ void Shell::RunShell(Isolate* isolate) {
     HandleScope inner_scope(isolate);
     Handle<String> input = console->Prompt(Shell::kPrompt);
     if (input.IsEmpty()) break;
-    ExecuteString(isolate, input, name, true, true);
+    ExecuteString(isolate, input, name, false, true);
   }
   printf("\n");
 }
@@ -1724,11 +1826,6 @@ int Shell::Main(int argc, char* argv[]) {
     // Run interactive shell if explicitly requested or if no script has been
     // executed, but never on --test
     if (options.use_interactive_shell()) {
-#ifndef V8_SHARED
-      if (!i::FLAG_debugger) {
-        InstallUtilityScript(isolate);
-      }
-#endif  // !V8_SHARED
       RunShell(isolate);
     }
   }

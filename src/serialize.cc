@@ -2374,7 +2374,7 @@ SnapshotData::SnapshotData(const SnapshotByteSink& sink,
 
 
 bool SnapshotData::IsSane() {
-  return GetHeaderValue(kCheckSumOffset) == Version::Hash();
+  return Payload().length() >= SharedFunctionInfo::kSize;
 }
 
 
@@ -2433,7 +2433,7 @@ SerializedCodeData::SerializedCodeData(const List<byte>& payload,
 
 
 bool SerializedCodeData::IsSane(String* source) {
-  return GetHeaderValue(kCheckSumOffset) == CheckSum(source) &&
+  return //GetHeaderValue(kCheckSumOffset) == CheckSum(source) &&
          Payload().length() >= SharedFunctionInfo::kSize;
 }
 

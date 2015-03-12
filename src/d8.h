@@ -309,6 +309,8 @@ class Shell : public i::AllStatic {
     args.GetReturnValue().Set(ReadFromStdin(args.GetIsolate()));
   }
   static void Load(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void Compile(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void RunBin(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void ArrayBuffer(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Int8Array(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Uint8Array(const v8::FunctionCallbackInfo<v8::Value>& args);
