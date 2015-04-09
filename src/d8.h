@@ -300,6 +300,8 @@ class Shell : public i::AllStatic {
                              Local<Value> value,
                              const  PropertyCallbackInfo<void>& info);
 
+  static void MakeSnapshot(const v8::FunctionCallbackInfo<v8::Value>& args);
+  static void LoadSnapshot(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Print(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Write(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void Quit(const v8::FunctionCallbackInfo<v8::Value>& args);

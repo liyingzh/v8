@@ -926,6 +926,10 @@ Handle<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
                        FunctionTemplate::New(isolate, Load));
   global_template->Set(String::NewFromUtf8(isolate, "quit"),
                        FunctionTemplate::New(isolate, Quit));
+  global_template->Set(String::NewFromUtf8(isolate, "makesnapshot"),
+                       FunctionTemplate::New(isolate, MakeSnapshot));
+  global_template->Set(String::NewFromUtf8(isolate, "loadsnapshot"),
+                       FunctionTemplate::New(isolate, LoadSnapshot));
   global_template->Set(String::NewFromUtf8(isolate, "version"),
                        FunctionTemplate::New(isolate, Version));
 
@@ -1140,6 +1144,92 @@ static void ReadBufferWeakCallback(
   delete data.GetParameter();
 }
 
+
+void Shell::MakeSnapshot(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  // By default, log code create information in the snapshot.
+  i::FLAG_log_code = true;
+  i::FLAG_logfile_per_isolate = false;
+  i::CpuFeatures::Probe(true);
+
+  {
+    HandleScope handle_scope(args.GetIsolate());
+    String::Utf8Value source_file(args[0]);
+    if (*source_file == NULL) {
+      Throw(args.GetIsolate(), "Error loading source file");
+      return;
+    }
+    int size;
+    char* chars = ReadChars(args.GetIsolate(), *source_file, &size);
+    if (chars == NULL) {
+      Throw(args.GetIsolate(), "Error reading source file");
+      return;
+    }
+
+    v8::StartupData blob = v8::V8::CreateSnapshotDataBlob(chars);
+    if(blob.data == NULL) {
+      Throw(args.GetIsolate(), "Error snapshot");
+      return;
+    }
+
+    String::Utf8Value snapshot(args[1]);
+    FILE* snapshot_file = FOpen(*snapshot, "wb");
+    fprintf(snapshot_file, "%d\n", blob.raw_size);
+    uint8_t* cache = new uint8_t[blob.raw_size];
+    memcpy(cache, blob.data, blob.raw_size);
+    fwrite(cache, 1, blob.raw_size, snapshot_file);
+    delete[] blob.data;
+    fclose(snapshot_file);
+  }
+}
+
+
+void Shell::LoadSnapshot(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  HandleScope handle_scope(args.GetIsolate());
+  String::Utf8Value file(args[0]);
+  if (*file == NULL) {
+    Throw(args.GetIsolate(), "Error loading file");
+    return;
+  }
+  FILE* snapshot_file = FOpen(*file, "rb");
+  int length;
+  fscanf(snapshot_file, "%d\n", &length);
+  int location = ftell(snapshot_file);
+  fseek(snapshot_file, 0, SEEK_END);
+  int size_total = ftell(snapshot_file);
+  int size = size_total - location;
+
+  fseek(snapshot_file, location, SEEK_SET);
+  char* chars = new char[size + 1];
+  chars[size] = '\0';
+  for (int i = 0; i < size;) {
+    int read = static_cast<int>(fread(&chars[i], 1, size - i, snapshot_file));
+    i += read;
+  }
+  fclose(snapshot_file);
+  if (chars == NULL) {
+    Throw(args.GetIsolate(), "Error loading file");
+    return;
+  }
+
+  v8::StartupData data = { chars, length };
+  v8::Isolate::CreateParams params;
+  params.snapshot_blob = &data;
+  v8::Isolate* isolate = v8::Isolate::New(params);
+  {
+    v8::Isolate::Scope i_scope(isolate);
+    v8::HandleScope h_scope(isolate);
+    v8::Local<v8::Context> context = v8::Context::New(isolate);
+    delete[] data.data;  // We can dispose of the snapshot blob now.
+    v8::Context::Scope c_scope(context);
+
+    Local<String> test_str = String::NewFromUtf8(isolate, "f()");
+    Local<Script> script = Script::Compile(test_str);
+    Local<Value> result = script->Run();
+    String::Utf8Value utf8(result);
+    printf("%s\n", *utf8);
+  }
+  isolate->Dispose();
+}
 
 void Shell::ReadBuffer(const v8::FunctionCallbackInfo<v8::Value>& args) {
   DCHECK(sizeof(char) == sizeof(uint8_t));  // NOLINT
