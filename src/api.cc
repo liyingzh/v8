@@ -306,10 +306,23 @@ bool RunExtraCode(Isolate* isolate, const char* utf8_source) {
   Local<String> source_string = String::NewFromUtf8(isolate, utf8_source);
   if (try_catch.HasCaught()) return false;
   ScriptOrigin origin(String::NewFromUtf8(isolate, "<embedded script>"));
-  ScriptCompiler::Source source(source_string, origin);
-  Local<Script> script = ScriptCompiler::Compile(isolate, &source);
+  ScriptCompiler::Source script_source(source_string, origin);
+  ScriptCompiler::CompileUnbound(isolate, &script_source, ScriptCompiler::kProduceCodeCache);
+  ScriptCompiler::CachedData* cache_data = NULL;
+  if (script_source.GetCachedData()) {
+    int length = script_source.GetCachedData()->length;
+    uint8_t* cache = new uint8_t[length];
+    memcpy(cache, script_source.GetCachedData()->data, length);
+    cache_data = new ScriptCompiler::CachedData(
+          cache, length, ScriptCompiler::CachedData::BufferOwned);
+    }
+  ScriptCompiler::Source cached_source(String::NewFromUtf8(isolate, ""), cache_data);
+  Local<Script> script = ScriptCompiler::Compile(isolate, &cached_source, ScriptCompiler::kConsumeCodeCache);
+
   if (try_catch.HasCaught()) return false;
-  script->Run();
+  Local<Value> result = script->Run();
+  String::Utf8Value utf8(result);
+  printf("%s\n", *utf8);
   if (i::FLAG_profile_deserialization) {
     i::PrintF("Executing custom snapshot script took %0.3f ms\n",
               timer.Elapsed().InMillisecondsF());
